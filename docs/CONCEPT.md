@@ -72,7 +72,7 @@ GoUNITY Certificate v1 (binary encoding):
 
 **Total size:** ~150-180 bytes (depending on username length)
 
-### 3.2 JSON representation (for SimpleX profile)
+### 3.2 JSON representation (for transport via GoBot or GoChat)
 
 ```json
 {
@@ -89,8 +89,9 @@ GoUNITY Certificate v1 (binary encoding):
 }
 ```
 
-This JSON block is stored in the SimpleX profile's custom fields.
-Any client that understands GoUNITY can read and verify it.
+This JSON block can be stored in the SimpleX profile's custom fields
+(for GoChat) or submitted as a chat message to GoBot (for the
+standard SimpleX app).
 
 ### 3.3 Certificate verification (local, offline)
 
@@ -105,8 +106,8 @@ verify(certificate):
 ```
 
 No network request needed. The GoUNITY public key is embedded in
-every client that supports verification. Verification works offline,
-in airplane mode, behind firewalls.
+every verifier (GoBot, GoChat, SimpleGo hardware). Verification
+works offline, in airplane mode, behind firewalls.
 
 ### 3.4 Certificate properties
 
@@ -154,6 +155,7 @@ queue IDs, server addresses, or connection tokens.
 | GoUNITY server compromised | Attacker gets usernames + emails. Cannot link to SimpleX activity. |
 | SMP server compromised | Attacker gets encrypted blobs + queue IDs. Cannot link to GoUNITY usernames. |
 | GoShop database compromised | Attacker gets usernames + orders. Cannot get email/phone (stored at GoUNITY). |
+| GoBot instance compromised | Attacker gets group members + bans. Cannot get email/phone/payment or other groups. |
 | Man-in-the-middle | Certificate signature prevents forgery. E2E encryption prevents content interception. |
 | Rogue GoUNITY operator | Can issue fake certificates. Mitigated by certificate transparency log (Phase 7). |
 | State-level adversary | Can potentially correlate timing across systems. Mitigated by cover traffic (GRP profile). |
@@ -165,7 +167,8 @@ Even if GoUNITY wanted to (or was forced by a court):
 - **Cannot read messages.** Messages are E2E encrypted between users.
   GoUNITY has no keys.
 - **Cannot identify group members.** GoUNITY doesn't know which
-  groups a user joins.
+  groups a user joins. GoBot stores member lists locally on the
+  admin's server, not on GoUNITY.
 - **Cannot link purchases.** GoShop orders are E2E encrypted to the
   shop owner. GoUNITY has no access.
 - **Cannot track devices.** No device fingerprinting, no IP logging
@@ -173,12 +176,78 @@ Even if GoUNITY wanted to (or was forced by a court):
 
 ---
 
-## 5. Moderation system
+## 5. Enforcement: GoBot
 
-### 5.1 Group moderation model
+### 5.1 The bridge to standard SimpleX
 
-Groups maintain a local moderation database (stored on the admin's
-device, synced via SMP to co-admins):
+GoUNITY issues certificates, but certificates alone are useless
+without enforcement. [GoBot](https://github.com/saschadaemgen/GoBot)
+is the enforcement arm:
+
+```
+GoUNITY issues passports.
+GoBot checks them at the door.
+```
+
+GoBot runs as a headless SimpleX client (via simplex-chat CLI).
+It joins groups as an admin member and handles all verification and
+moderation through normal chat messages. Users interact with GoBot
+using their standard, unmodified SimpleX app.
+
+### 5.2 How GoBot verifies certificates
+
+```
+User joins group -> GoBot greets and asks for certificate
+User sends: /verify eyJ2IjoxLC...
+GoBot:
+  1. Decodes certificate from base64
+  2. Verifies Ed25519 signature (GoUNITY public key)
+  3. Checks expiration date
+  4. Checks local CRL (Certificate Revocation List)
+  5. Checks group ban list
+  6. Checks minimum verification level
+  -> All pass: "Welcome, MeinPrinz!"
+  -> Any fail: explains reason, restricts or removes user
+```
+
+**Critical privacy property:** GoBot verifies locally. No request
+to GoUNITY during verification. GoUNITY never learns where a
+certificate is used.
+
+### 5.3 GoBot moderation capabilities
+
+| Action | Command | Effect |
+|:-------|:--------|:-------|
+| Ban | /ban username reason | Permanent removal, cannot rejoin |
+| Mute | /mute username 24h | Read-only for duration |
+| Restrict | /restrict username 5/h | Message rate limit |
+| Warn | /warn username | Tracked warning (visible to admins) |
+| Report | /report username reason | User-initiated report to admins |
+| Mode | /mode verified | Set group to verified-only |
+
+### 5.4 CRL synchronization
+
+GoBot periodically fetches the Certificate Revocation List:
+
+```
+Daily (configurable):
+  1. HTTPS GET https://id.simplego.dev/v1/crl
+  2. Verify CRL signature (GoUNITY public key)
+  3. Cross-reference with active group members
+  4. Notify/remove members with revoked certificates
+```
+
+This is the only regular contact between GoBot and GoUNITY.
+It reveals nothing about which groups GoBot moderates.
+
+---
+
+## 6. Moderation system
+
+### 6.1 Group moderation model
+
+Groups maintain a local moderation database (stored on the GoBot
+server, synced to co-admins via SMP):
 
 ```
 Group Moderation State:
@@ -202,20 +271,20 @@ Group Moderation State:
 }
 ```
 
-### 5.2 Ban enforcement flow
+### 6.2 Ban enforcement flow
 
 ```
 "ToxicUser" tries to join a verified-only group:
 
-1. "ToxicUser" presents GoUNITY certificate
-2. Group admin's client checks:
+1. "ToxicUser" presents GoUNITY certificate via /verify
+2. GoBot checks:
    a. Certificate valid? -> YES (signature OK, not expired)
    b. Username on ban list? -> YES ("ToxicUser" banned)
    c. Result: REJECT entry
 3. "ToxicUser" cannot join
 
 "ToxicUser" creates new SimpleX profile "NiceGuy":
-4. No GoUNITY certificate -> Group is verified-only -> REJECT
+4. No GoUNITY certificate -> Group is verified-only -> GoBot REJECTS
 5. "ToxicUser" cannot join without a valid certificate
 
 "ToxicUser" registers new GoUNITY username "NiceGuy2":
@@ -225,36 +294,35 @@ Group Moderation State:
 9. Previous ban history visible to admins (if cross-reference enabled)
 ```
 
-### 5.3 Report system
+### 6.3 Report system
 
 ```
 User A reports User B in a group:
 
-1. User A clicks "Report" on User B's message
-2. Selects reason: spam / harassment / off-topic / other
-3. Report sent to group admins via SMP (encrypted)
-4. Admins see: reporter (if not anonymous), reported user, message, reason
-5. Admin takes action: warn / mute / restrict / ban / dismiss
-6. Action is synced to all group clients via SMP
+1. User A sends: /report MeinPrinz harassment
+2. GoBot forwards report to group admins (via DM)
+3. Admins see: reporter, reported user, reason, recent messages
+4. Admin takes action: /warn, /mute, /restrict, /ban, or dismisses
+5. Action executed by GoBot in real-time
 ```
 
 Reports stay within the group. GoUNITY SIS never sees reports.
 All moderation is decentralized - the group admins decide.
 
-### 5.4 Cross-group ban sharing (optional, Phase 7)
+### 6.4 Cross-group ban sharing (optional, Phase 7)
 
-Groups can optionally publish their ban lists (signed by the group
-admin's key). Other groups can subscribe to these lists:
+Groups can optionally publish their ban lists (signed by GoBot
+using the group admin's key). Other GoBot instances can subscribe:
 
 ```
 "Anti-Spam Coalition" ban list:
   Signed by: GroupAdmin1, GroupAdmin2, GroupAdmin3
   Bans: ["SpamBot1", "SpamBot2", "Scammer99", ...]
 
-Groups can choose:
-  [ ] No shared ban lists
-  [x] Subscribe to "Anti-Spam Coalition"
-  [ ] Subscribe to "SimpleX Trust Network"
+GoBot config:
+  shared_ban_lists:
+    - url: "https://bans.simplego.dev/anti-spam.json"
+      trust: true
 ```
 
 This creates a decentralized, opt-in reputation system without any
@@ -262,9 +330,9 @@ central authority controlling who gets banned.
 
 ---
 
-## 6. GoShop integration
+## 7. GoShop integration
 
-### 6.1 Verified commerce
+### 7.1 Verified commerce
 
 ```
 GoShop listing:
@@ -277,9 +345,10 @@ GoShop listing:
   2. Customer sends order details (E2E encrypted)
   3. Order includes GoUNITY username (if verified)
   4. Shop can require verified customers for high-value orders
+  5. GoBot in shop group confirms customer verification level
 ```
 
-### 6.2 Trust tiers for shops
+### 7.2 Trust tiers for shops
 
 | Customer level | Shop may allow... |
 |:--------------|:------------------|
@@ -289,17 +358,17 @@ GoShop listing:
 | Premium | High-value orders, credit/invoice |
 
 Each shop decides its own policy. GoUNITY provides the verification
-infrastructure; shops decide how to use it.
+infrastructure; GoBot enforces it; shops decide how to use it.
 
 ---
 
-## 7. SIS Backend architecture
+## 8. SIS Backend architecture
 
-### 7.1 Technology choices
+### 8.1 Technology choices
 
 | Component | Choice | Reasoning |
 |:----------|:-------|:----------|
-| Language | Go | Matches GoRelay, excellent crypto stdlib, single binary deployment |
+| Language | Go | Matches GoRelay + GoBot, excellent crypto stdlib, single binary |
 | Database | PostgreSQL | ACID transactions for username uniqueness, mature, reliable |
 | API | REST + JSON | Universal, easy to integrate from any client |
 | Signing | Ed25519 (Go crypto/ed25519) | FIPS-quality implementation in Go stdlib |
@@ -309,7 +378,7 @@ infrastructure; shops decide how to use it.
 | Hosting | Hetzner (Germany) | EU data sovereignty, GDPR, affordable |
 | TLS | Let's Encrypt | Free, automated |
 
-### 7.2 Database schema (draft)
+### 8.2 Database schema (draft)
 
 ```sql
 CREATE TABLE users (
@@ -349,95 +418,81 @@ CREATE TABLE audit_log (
 plaintext. This prevents mass data exfiltration while still allowing
 duplicate detection (same email cannot register twice).
 
-### 7.3 API specification (draft)
+### 8.3 API specification (draft)
 
 ```
-POST /v1/register
-  Body: { username, email, level, pubkey }
-  Returns: { userId, verificationToken }
-  
-POST /v1/verify/email
-  Body: { userId, code }
-  Returns: { verified: true }
-
-POST /v1/verify/phone
-  Body: { userId, code }
-  Returns: { verified: true }
-  
-POST /v1/pay
-  Body: { userId, stripeToken, plan }
-  Returns: { paidUntil }
-
-POST /v1/certificate/issue
-  Body: { userId }
-  Auth: Bearer token
-  Returns: { certificate (binary, base64) }
-
-POST /v1/certificate/renew
-  Body: { userId }
-  Auth: Bearer token
-  Returns: { certificate (binary, base64) }
-
-POST /v1/certificate/revoke
-  Body: { userId, reason }
-  Auth: Bearer token
-  Returns: { revoked: true }
-
-GET /v1/username/{name}
-  Returns: { available: true/false }
-
-GET /v1/pubkey
-  Returns: { pubkey (base64), algorithm: "Ed25519" }
-
-GET /v1/crl
-  Returns: { version, timestamp, revoked: ["user1", "user2"], signature }
+POST   /v1/register          Register username + start verification
+POST   /v1/verify/email      Confirm email verification code
+POST   /v1/verify/phone      Confirm phone verification code
+POST   /v1/pay               Process payment via Stripe
+POST   /v1/certificate       Issue signed certificate (after verification + payment)
+POST   /v1/renew             Renew certificate before expiration
+POST   /v1/revoke            Revoke own certificate (voluntary)
+GET    /v1/check/{username}  Check if username is taken
+GET    /v1/crl               Get current Certificate Revocation List
+GET    /v1/pubkey            Get GoUNITY's public verification key
 ```
 
 ---
 
-## 8. Client integration
+## 9. Client integration matrix
 
-### 8.1 SimpleX profile extension
+### 9.1 Three verification channels
 
-GoUNITY certificates are stored in the SimpleX profile's JSON as a
-custom field. When a user updates their profile, the certificate
-travels with it automatically through the existing SimpleX protocol.
+| Client | How verification works | App modification needed? |
+|:-------|:----------------------|:------------------------|
+| **GoChat** (browser) | Certificate in profile JSON, local Ed25519 verify, badge display | No (native support) |
+| **GoBot** (any SimpleX app) | User sends /verify command with certificate text, GoBot verifies | No (standard app) |
+| **SimpleGo** (ESP32-S3) | Certificate in connection data, hardware Ed25519 verify, badge on screen | No (native support) |
 
-```json
-{
-  "displayName": "MeinPrinz",
-  "fullName": "",
-  "preferences": { ... },
-  "gounity": {
-    "v": 1,
-    "username": "MeinPrinz",
-    "level": "verified",
-    "sig": "base64url(...)"
-  }
+### 9.2 GoChat integration
+
+GoChat stores the certificate in the connection profile and verifies
+locally using the GoUNITY public key embedded in the JavaScript bundle:
+
+```javascript
+// GoChat certificate verification (browser)
+import { ed25519 } from '@noble/curves/ed25519';
+
+function verifyGoUNITY(cert, gounityPubKey) {
+  const dataToVerify = cert.slice(0, -64);  // everything except signature
+  const signature = cert.slice(-64);         // last 64 bytes
+  return ed25519.verify(signature, dataToVerify, gounityPubKey);
 }
 ```
 
-### 8.2 GoChat integration
+### 9.3 GoBot integration
 
-GoChat (browser widget) displays a verification badge next to verified
-usernames. The badge is rendered based on local certificate verification
-- no GoUNITY server contact needed.
+GoBot wraps the simplex-chat CLI and processes /verify commands:
 
+```go
+// GoBot certificate verification (server)
+import "crypto/ed25519"
+
+func verifyGoUNITY(cert []byte, gounityPubKey ed25519.PublicKey) bool {
+    dataToVerify := cert[:len(cert)-64]
+    signature := cert[len(cert)-64:]
+    return ed25519.Verify(gounityPubKey, dataToVerify, signature)
+}
 ```
-[ MeinPrinz (Verified) ]: Hello, I'd like to order the ESP32 board.
-[ Anonymous User ]: Is this available in blue?
-[ TechShop (Business) ]: Yes! Both colors in stock.
+
+### 9.4 SimpleGo hardware integration
+
+The ESP32-S3 verifies certificates using mbedTLS Ed25519:
+
+```c
+// SimpleGo certificate verification (ESP32-S3)
+int verify_gounity(const uint8_t *cert, size_t cert_len,
+                   const uint8_t *gounity_pubkey) {
+    size_t data_len = cert_len - 64;
+    const uint8_t *sig = cert + data_len;
+    return mbedtls_ed25519_verify(sig, gounity_pubkey, cert, data_len);
+}
 ```
-
-### 8.3 SimpleGo hardware integration
-
-The ESP32-S3 SimpleGo terminal verifies certificates locally using
-its hardware Ed25519 implementation. A small badge icon appears next
-to verified contacts on the display.
 
 ---
 
-## 9. Revenue model
+## 10. Revenue model
 
 | Plan | Price | Features |
 |:-----|:------|:---------|
@@ -446,16 +501,18 @@ to verified contacts on the display.
 | Business | 15 EUR/year | + company verification + GoShop trust badge |
 | Premium | 30 EUR/year | + KYC verification + financial trust level |
 
-**Projected break-even:** ~500 paying users at average 8 EUR/year = 4,000 EUR/year. Server costs ~600 EUR/year (Hetzner). Sustainable from day one with low user numbers.
+**Projected break-even:** ~500 paying users at average 8 EUR/year
+= 4,000 EUR/year. Server costs ~600 EUR/year (Hetzner). Sustainable
+from day one with low user numbers.
 
 ---
 
-## 10. Phased implementation plan
+## 11. Phased implementation plan
 
-### Phase 0: Architecture (current)
+### Phase 0: Architecture (DONE)
 - This concept document
-- README.md
-- Repository setup
+- README.md with GoBot integration
+- GoBot concept document
 
 ### Phase 1: SIS Backend (MVP)
 - Go REST API with PostgreSQL
@@ -465,27 +522,28 @@ to verified contacts on the display.
 - Stripe payment integration
 - Deployed on id.simplego.dev
 
-### Phase 2: GoChat integration
+### Phase 2: GoBot integration
+- GoBot verifies certificates in SimpleX groups
+- Ban enforcement by verified username
+- Moderation commands (ban/mute/restrict/warn)
+- CRL synchronization
+
+### Phase 3: GoChat integration
 - Certificate in SimpleX profile JSON
 - Badge rendering in chat UI
 - Local certificate verification
 - "Verified" indicator next to username
 
-### Phase 3: Group moderation
-- Verified-only group mode
-- Ban/mute/restrict by username
+### Phase 4: Group moderation (advanced)
+- Auto-moderation (spam, flood, cooldown)
 - Report system
-- Moderation sync via SMP
+- Multi-group GoBot management
+- Admin web dashboard
 
-### Phase 4: GoShop integration
+### Phase 5: GoShop integration
 - Verified checkout
 - Trust badges on shop listings
 - Customer verification requirements
-
-### Phase 5: SimpleX App addon
-- Certificate management UI
-- Badge display in chat
-- Group moderation tools
 
 ### Phase 6: SimpleGo hardware
 - Certificate verification on ESP32-S3
@@ -500,20 +558,20 @@ to verified contacts on the display.
 
 ---
 
-## 11. Open questions
+## 12. Open questions
 
 1. **SimpleX profile custom fields:** Does the current SimpleX profile
-   format support arbitrary JSON fields? If not, can the certificate
-   be embedded in the displayName or fullName? Or does it need a
-   separate SMP message?
+   format support arbitrary JSON fields? If not, GoBot's chat-based
+   verification is the primary path (no profile modification needed).
 
 2. **Certificate size budget:** SimpleX profiles are transmitted in
    16KB SMP blocks. A 300-byte certificate easily fits. But if we
    add features (reputation, badges, metadata), what's the safe limit?
 
 3. **Multi-device support:** If a user has SimpleX on phone + desktop
-   + GoChat in browser, how does the certificate sync? Is it enough
-   to store it in the profile (which syncs automatically)?
+   + GoChat in browser, each device submits the certificate
+   independently to GoBot. GoBot stores the verification per group,
+   not per device.
 
 4. **Legal requirements:** For Business/Premium verification levels,
    what KYC requirements apply under EU law? Do we need a licensed
@@ -521,10 +579,12 @@ to verified contacts on the display.
 
 5. **SimpleX community reaction:** Will Evgeny and the SimpleX community
    welcome or resist an optional identity layer? Positioning matters -
-   it must be clear this is an ecosystem addon, not a core protocol
-   change.
+   GoBot approach is ideal because it requires zero upstream changes.
+
+6. **simplex-chat CLI API:** Is the JSON API mode stable enough for
+   GoBot production use? What happens on CLI version updates?
 
 ---
 
-*GoUNITY Technical Concept v1 - March 2026*
+*GoUNITY Technical Concept v2 - March 2026*
 *IT and More Systems, Recklinghausen, Germany*

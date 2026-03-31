@@ -21,6 +21,8 @@ GoUNITY solves the biggest unsolved problem in encrypted messaging: **how do you
 
 The answer: give users the *choice* between anonymity and verified identity. Groups can then decide their own rules - from fully anonymous to fully verified, with everything in between.
 
+GoUNITY works with the **standard, unmodified SimpleX app** through [GoBot](https://github.com/saschadaemgen/GoBot) - a moderation bot that verifies certificates and enforces bans directly in SimpleX groups. No plugins, no app modifications, no forks. Users keep their existing SimpleX app and interact with GoBot through normal chat messages.
+
 ---
 
 ## The problem
@@ -76,7 +78,7 @@ A GoUNITY username is a cryptographically signed certificate. Think of it as a d
 
 ### The certificate
 
-A GoUNITY certificate is a small signed data structure (~300 bytes) that lives inside the user's SimpleX profile:
+A GoUNITY certificate is a small signed data structure (~300 bytes) that lives inside the user's SimpleX profile or is submitted as a chat message to [GoBot](https://github.com/saschadaemgen/GoBot):
 
 ```
 GoUNITY Verified Username Certificate v1:
@@ -110,14 +112,63 @@ Higher levels unlock additional trust badges and features. A "Business" user in 
 
 ---
 
+## How verification works in practice
+
+GoUNITY verification reaches SimpleX users through three channels:
+
+### Channel 1: GoBot (standard SimpleX app - no modifications)
+
+[GoBot](https://github.com/saschadaemgen/GoBot) is a moderation bot that runs as a headless SimpleX client. It joins groups as an admin member and handles all verification and moderation through normal chat messages. This is the primary channel because it works with every SimpleX app on every platform today.
+
+```
+User joins group (standard SimpleX app)
+  |
+  v
+GoBot: "Welcome! This group requires GoUNITY verification.
+        Please send your certificate with /verify <certificate>
+        Get one at https://id.simplego.dev/register"
+  |
+  v
+User sends: /verify eyJ2IjoxLCJ1c2VybmFtZSI6Ik1l...
+  |
+  v
+GoBot verifies:
+  1. Ed25519 signature valid?          -> YES
+  2. Certificate expired?              -> NO  
+  3. Username on ban list?             -> NO
+  4. Minimum verification level met?   -> YES
+  |
+  v
+GoBot: "Verified! Welcome, MeinPrinz."
+GoBot grants full messaging permissions.
+```
+
+**No app modification needed.** Users keep their standard SimpleX app. GoBot handles everything.
+
+### Channel 2: GoChat (browser widget - native support)
+
+[GoChat](https://github.com/saschadaemgen/GoChat) has native GoUNITY support. The certificate is stored in the connection profile and verified locally in the browser using the GoUNITY public key. Verification badges appear next to usernames automatically.
+
+```
+[ MeinPrinz (Verified) ]: Hello, I'd like to order the ESP32 board.
+[ Anonymous User ]: Is this available in blue?
+[ TechShop (Business) ]: Yes! Both colors in stock.
+```
+
+### Channel 3: SimpleGo hardware (ESP32-S3 - native support)
+
+[SimpleGo](https://github.com/saschadaemgen/SimpleGo) terminals verify certificates locally using hardware Ed25519 implementation. A verification badge appears on the display next to verified contacts.
+
+---
+
 ## Group moderation
 
-GoUNITY transforms SimpleX groups from unmoderable anonymous spaces into communities with real accountability - without sacrificing the privacy of honest participants.
+GoUNITY transforms SimpleX groups from unmoderable anonymous spaces into communities with real accountability - without sacrificing the privacy of honest participants. All moderation is executed by [GoBot](https://github.com/saschadaemgen/GoBot).
 
 ### Group modes
 
 ```
-Group settings -> Membership policy:
+Group settings (via GoBot /mode command):
 
   ( ) Open             Anyone can join, no verification needed
   ( ) Mixed            Unverified users allowed with restrictions
@@ -136,15 +187,31 @@ Group settings -> Membership policy:
 | Voice messages | Yes / No |
 | Reply to threads | Yes / No |
 
-### Moderation actions (verified users)
+### Moderation actions
 
-| Action | Duration | Effect |
-|:-------|:---------|:-------|
-| Warning | Permanent record | Visible to admins |
-| Mute | 1h / 24h / 7d / 30d / permanent | User can read but not write |
-| Restrict | 1h / 24h / 7d | Limited to X messages per hour |
-| Ban | Permanent | Cannot rejoin with same username |
-| Report | Triggers review | Other users can flag behavior |
+Admins issue moderation commands through GoBot:
+
+```
+/ban MeinPrinz harassment         Ban user permanently
+/mute MeinPrinz 24h               Mute for 24 hours (read-only)
+/restrict MeinPrinz 5/h           Limit to 5 messages per hour
+/warn MeinPrinz                   Issue tracked warning
+/unban MeinPrinz                  Remove ban
+/unmute MeinPrinz                 Remove mute
+/status MeinPrinz                 Show moderation history
+/banlist                          Show all active bans
+/reports                          Show pending user reports
+/mode verified                    Set group to verified-only
+```
+
+Users can also interact:
+
+```
+/verify <certificate>             Submit GoUNITY certificate
+/report MeinPrinz spam            Report a user to admins
+/mystatus                         Check own verification status
+/rules                            Show group rules
+```
 
 ### Why bans actually work
 
@@ -152,17 +219,38 @@ Group settings -> Membership policy:
 WITHOUT GoUNITY:
   "ToxicUser" banned -> new profile "NiceGuy123" -> rejoins -> repeats
   
-WITH GoUNITY (verified-only group):
+WITH GoUNITY (verified-only group via GoBot):
   "ToxicUser" banned -> 
-    Same certificate? -> "ToxicUser" is banned, entry denied
+    Same certificate? -> GoBot checks ban list -> REJECTED
     New certificate? -> Costs money + new verification + new username
-    Anonymous profile? -> Group is verified-only, entry denied
+    Anonymous profile? -> GoBot: group is verified-only -> REJECTED
     
   Ban evasion cost: 5-30 EUR + new email/phone + waiting period
   Ban evasion cost without GoUNITY: 3 seconds (new profile)
 ```
 
-The economic barrier does not need to be high. The goal is not to make ban evasion impossible - it's to make it inconvenient enough that most abusers don't bother. This is the same principle that makes spam email expensive (CAN-SPAM fines) while keeping regular email free.
+### Auto-moderation (GoBot)
+
+GoBot can act autonomously based on configurable rules:
+
+```
+Auto-moderation rules:
+
+  Spam detection:
+    [x] Auto-mute after 10 messages in 60 seconds
+    [x] Auto-delete messages with known spam patterns
+    [ ] Auto-ban after 3 auto-mutes
+    
+  New member restrictions:
+    [x] Read-only for first 5 minutes
+    [x] No files for first 24 hours
+    [x] No links for first 24 hours
+    
+  Flood protection:
+    [x] Max 30 messages per hour per user
+    [x] Max 5 images per hour per user
+    [ ] Slow mode: 1 message per 30 seconds
+```
 
 ---
 
@@ -200,22 +288,23 @@ GoUNITY's privacy model rests on one fundamental principle: **no single system h
 | GoUNITY database | Usernames, emails, payment | Messages, contacts, groups, orders |
 | SMP relay server | Encrypted blobs, queue IDs | Who owns which queue, message content |
 | GoShop database | Usernames, orders, addresses | Email, phone, SMP queues, messages |
+| GoBot instance | Group members, bans, usernames | Email, phone, payment, other groups |
 | GoUNITY + SMP server | Still nothing new | Certificate has no SMP queue info |
 | GoUNITY + GoShop | Username links to orders | Still no SMP queues or messages |
-| All three systems | Username + orders + email | Message content (E2E encrypted) |
+| All systems | Username + orders + email | Message content (E2E encrypted) |
 
-Even compromising all three systems simultaneously does not reveal message content - that requires breaking the Double Ratchet encryption on the user's device.
+Even compromising all systems simultaneously does not reveal message content - that requires breaking the Double Ratchet encryption on the user's device.
 
 ### Zero-knowledge certificate verification
 
-When a user presents their GoUNITY certificate to a group, the verification happens locally:
+When a user presents their GoUNITY certificate (via GoBot or GoChat), verification happens locally:
 
 ```
-1. User sends certificate (300 bytes) to group
-2. Every group member independently:
+1. User sends certificate to GoBot (or GoChat verifies in-browser)
+2. Verifier independently:
    a. Checks: Is the signature valid? (Ed25519 verify with GoUNITY public key)
    b. Checks: Is the certificate expired?
-   c. Checks: Is the username on the group's ban list?
+   c. Checks: Is the username on the ban list?
 3. No network request to GoUNITY needed
 4. GoUNITY never learns which groups the user joins
 ```
@@ -224,7 +313,7 @@ This is the key privacy property: **GoUNITY issues certificates but never learns
 
 ### Certificate revocation
 
-If a user's account is suspended (fraud, payment failure), GoUNITY publishes a Certificate Revocation List (CRL) - a signed list of revoked usernames. Groups can periodically fetch this list (e.g. daily) to ensure banned users stay banned even after their certificate technically hasn't expired.
+If a user's account is suspended (fraud, payment failure), GoUNITY publishes a Certificate Revocation List (CRL) - a signed list of revoked usernames. GoBot and GoChat periodically fetch this list (e.g. daily) to ensure revoked users are detected even before their certificate technically expires.
 
 The CRL reveals only which usernames are revoked - not why, not where they were used, not who reported them.
 
@@ -249,6 +338,8 @@ Shop owner "TechShop" (Business Verified):
 Neither GoUNITY nor the SMP server sees the order.
 The shop's hosting provider sees only encrypted blocks.
 ```
+
+For GoShop groups moderated by GoBot, the bot can also assist with order verification - confirming that customers meet the shop's minimum verification level before processing orders.
 
 **Trust badges in GoShop:**
 
@@ -276,23 +367,24 @@ GoUNITY Ecosystem:
 |   Username registry    |
 |   Payment processing   |
 |   Revocation lists     |
-+------------------------+
++----------+-------------+
            |
-           | HTTPS (registration + renewal only)
+           | HTTPS (registration, renewal, CRL)
            |
-+----------+-------------+-------------------+
-|                        |                    |
-v                        v                    v
-+---------------+  +---------------+  +---------------+
-| GoChat        |  | SimpleX App   |  | SimpleGo HW   |
-| (browser)     |  | (with addon)  |  | (ESP32-S3)    |
-|               |  |               |  |               |
-| Certificate   |  | Certificate   |  | Certificate   |
-| in profile    |  | in profile    |  | in profile    |
-| Local verify  |  | Local verify  |  | Local verify  |
-| Mod panel     |  | Group admin   |  | Display badge |
-+---------------+  +---------------+  +---------------+
++----------+---+------------+-------------------+
+|              |             |                    |
+v              v             v                    v
++---------+  +---------+  +---------+  +------------------+
+| GoChat  |  | GoBot   |  | SimpleGo|  | SimpleX App      |
+| browser |  | server  |  | ESP32   |  | (via GoBot)      |
+|         |  |         |  |         |  |                  |
+| Native  |  | Verify  |  | Native  |  | No modification  |
+| verify  |  | via chat|  | verify  |  | needed - GoBot   |
+| + badge |  | + mod   |  | + badge |  | handles it all   |
++---------+  +---------+  +---------+  +------------------+
 ```
+
+**GoBot is the critical bridge.** It enables GoUNITY verification for the millions of existing SimpleX users without requiring any app changes. Users interact with GoBot through standard chat messages. GoBot verifies certificates locally and enforces moderation actions in real-time.
 
 ### Technology stack
 
@@ -305,6 +397,7 @@ v                        v                    v
 | Payment | Stripe / crypto | Both options for accessibility |
 | Hosting | Self-hosted (Hetzner) | EU data sovereignty, GDPR compliant |
 | CRL distribution | Signed JSON over HTTPS | Simple, cacheable, offline-verifiable |
+| GoBot | Go + simplex-chat CLI | Headless SimpleX client for group moderation |
 
 ### API endpoints (draft)
 
@@ -326,14 +419,14 @@ GET    /v1/pubkey            Get GoUNITY's public verification key
 
 | Phase | Focus | Status |
 |:------|:------|:-------|
-| 0 | Concept + Architecture (this document) | IN PROGRESS |
+| 0 | Concept + Architecture | DONE |
 | 1 | SIS Backend (Go): registration, verification, certificate issuing | Planned |
-| 2 | GoChat integration: certificate in profile, badge display | Planned |
-| 3 | Group moderation: verified-only mode, ban/mute/restrict | Planned |
-| 4 | GoShop integration: verified checkout, trust badges | Planned |
-| 5 | SimpleX App addon: certificate support in native app | Planned |
+| 2 | GoBot integration: certificate verification in SimpleX groups | Planned |
+| 3 | GoChat integration: certificate in profile, badge display | Planned |
+| 4 | Group moderation via GoBot: verified-only mode, ban/mute/restrict | Planned |
+| 5 | GoShop integration: verified checkout, trust badges | Planned |
 | 6 | SimpleGo hardware: badge display on ESP32-S3 | Planned |
-| 7 | Advanced features: reputation, dispute resolution | Future |
+| 7 | Advanced: cross-group bans, reputation, dispute resolution | Future |
 
 ---
 
@@ -347,8 +440,10 @@ GoUNITY is the identity layer of the SimpleGo ecosystem for encrypted communicat
 | **[GoRelay](https://github.com/saschadaemgen/GoRelay)** | Encrypted relay server (SMP + GRP) | [GoRelay](https://github.com/saschadaemgen/GoRelay) |
 | **[GoChat](https://github.com/saschadaemgen/GoChat)** | Browser-native encrypted chat plugin | [GoChat](https://github.com/saschadaemgen/GoChat) |
 | **[GoShop](https://github.com/saschadaemgen/GoShop)** | End-to-end encrypted e-commerce | [GoShop](https://github.com/saschadaemgen/GoShop) |
-| **[GoBot](https://github.com/saschadaemgen/GoBot)** | Automated messaging bot for SimpleX | [GoBot](https://github.com/saschadaemgen/GoBot) |
+| **[GoBot](https://github.com/saschadaemgen/GoBot)** | Moderation + automation bot for SimpleX | [GoBot](https://github.com/saschadaemgen/GoBot) |
 | **[GoUNITY](https://github.com/saschadaemgen/GoUNITY)** | Verified identity + moderation (this project) | [GoUNITY](https://github.com/saschadaemgen/GoUNITY) |
+
+**GoUNITY issues the passports. GoBot checks them at the door.**
 
 ---
 
